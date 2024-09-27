@@ -361,7 +361,7 @@ contract BRC1115 is IERC1115, Ownable {
         require(_lockBlock < block.number, "lock block cant greater than current block");
 
         require(liquidityAdded == false, "Liquidity already added");
-        require(balanceOf(address(this)) > 0, "zero balance");
+        // require(balanceOf(address(this)) > 0, "zero balance");
 
         uint256 _blockToUnlockLiquidity = block.number + _lockBlock;
 
@@ -371,7 +371,6 @@ contract BRC1115 is IERC1115, Ownable {
         require(block.number < _blockToUnlockLiquidity, 'Block number too low');
 
         blockToUnlockLiquidity = _blockToUnlockLiquidity;
-        tradingEnable = true;
 
         emit AddLiquidity(_blockToUnlockLiquidity, msg.value);
     }
@@ -444,7 +443,7 @@ contract BRC1115 is IERC1115, Ownable {
     function initLiquidityAmount(
         uint256 newLiquidityAmount
     ) public onlyOwner{
-        require(!liquidityAdded,"Liquidity already added");
+        require(liquidityAdded,"Liquidity already added");
 
         uint256 oldLiquidityAmount = balanceOf(address(this));
         if (oldLiquidityAmount > newLiquidityAmount){
@@ -460,6 +459,8 @@ contract BRC1115 is IERC1115, Ownable {
 
             _basicTransfer(msg.sender, address(this), diff);
         }
+        
+        tradingEnable = true;
     }
 
 
