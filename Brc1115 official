@@ -1,0 +1,480 @@
+/**
+ *Submitted for verification at BscScan.com on 2024-08-25
+*/
+
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+abstract contract Context {
+    function _msgSender() internal view virtual returns (address) {
+        return msg.sender;
+    }
+
+    function _msgData() internal view virtual returns (bytes calldata) {
+        this; // silence state mutability warning without generating bytecode - see https://github.com/ethereum/solidity/issues/2691
+        return msg.data;
+    }
+}
+
+contract Ownable is Context {
+    address private _owner;
+
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
+    constructor () {
+        address msgSender = _msgSender();
+        _owner = msgSender;
+        emit OwnershipTransferred(address(0), msgSender);
+    }
+
+    function owner() public view returns (address) {
+        return _owner;
+    }
+
+    modifier onlyOwner() {
+        require(_owner == _msgSender(), "Ownable: caller is not the owner");
+        _;
+    }
+
+    function renounceOwnership() public virtual onlyOwner {
+        emit OwnershipTransferred(_owner, address(0));
+        _owner = address(0);
+    }
+
+    function transferOwnership(address newOwner) public virtual onlyOwner {
+        require(newOwner != address(0), "Ownable: new owner is the zero address");
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
+    }
+}
+
+interface IERC20 {
+    function balanceOf(address account) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+    function transfer(address recipient, uint256 amount) external returns (bool);
+}
+
+interface IERC1115 {
+  event Transfer(address indexed from, address indexed to, uint256 value);
+  event AddLiquidity(uint256 _blockToUnlockLiquidity, uint256 value);
+  event RemoveLiquidity(uint256 value);
+  event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out);
+}
+
+interface IPancakeRouter {
+    function factory() external pure returns (address);
+    function WETH() external pure returns (address);
+
+    function swapExactTokensForETHSupportingFeeOnTransferTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external;
+
+}
+
+interface IPancakeFactory {
+    function createPair(address tokenA, address tokenB) external returns (address lpPair);
+}
+
+contract TokenDistributor {
+    address public _owner;
+    address public _router;
+    address public pcs_mkt;
+
+    constructor (address token_, address mkt_) {
+        if (block.chainid == 56){
+            _router = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
+        }else if (block.chainid == 137) {
+            _router = 0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff;
+        }else{
+            _router = 0xD99D1c33F9fC3444f8101754aBC46c52416550D1;
+        }
+        _owner = token_;
+        pcs_mkt = mkt_;
+    }
+
+    function swapForBNB() public {
+        require(msg.sender == _owner,"not owner");
+        IERC20(_owner).approve(_router, ~uint256(0));
+
+        address[] memory path = new address[](2);
+        path[0] = _owner;
+        path[1] = IPancakeRouter(_router).WETH();
+        IPancakeRouter(_router).swapExactTokensForETHSupportingFeeOnTransferTokens(
+            IERC20(_owner).balanceOf(address(this)),
+            0,
+            path,
+            pcs_mkt,
+            block.timestamp
+        );
+    }
+}
+
+contract BRC1115 is IERC1115, Ownable {
+    mapping(address account => uint256) private _balances;
+    mapping(address account => uint256) private _lastTxTime;
+    mapping(address account => uint32) private lastTransaction;
+    mapping(address => mapping(address => uint256)) private _allowances;
+
+    event Approval(
+        address indexed owner,
+        address indexed spender,
+        uint256 value
+    );
+
+    uint256 private _totalSupply;
+    uint256 public blockToUnlockLiquidity;
+
+    string private _name;
+    string private _symbol;
+
+    bool public tradingEnable;
+    bool public liquidityAdded;
+
+    TokenDistributor public mkt_distributor;
+    address payable public mkt_1115;
+    address payable public mkt_pcs;
+
+    address public _mainPair;
+    mapping(address => bool) public pancakeV2PairList;
+    mapping(address => bool) public excludeCoolingOf;
+
+    bool private inSwap;
+    uint256 public cooldownSec;
+
+    uint256 public pancakeMktFee;
+
+    uint256 public buyFundFee;
+    uint256 public sellFundFee;
+    
+    constructor(string memory tokenName, string memory tokenSymbol) {
+        _name = tokenName;
+        _symbol = tokenSymbol;
+        _totalSupply = 1000000000 * 10 ** 18;
+
+        // uint256 liquidityAmount = 100000000 * 10 ** 18;
+
+        mkt_1115 = payable(0xE29be23D182cBB66060095d9B2911C59257D16FC);
+        mkt_pcs = payable(0xE29be23D182cBB66060095d9B2911C59257D16FC);
+
+        _balances[msg.sender] = _totalSupply;
+
+        emit Transfer(address(0), msg.sender, _totalSupply);
+
+        cooldownSec = 3;
+
+        buyFundFee = 100;
+
+        sellFundFee = 100;
+
+        pancakeMktFee = 100;
+
+        tradingEnable = false;
+        liquidityAdded = false;
+
+        excludeCoolingOf[mkt_1115] = true;
+        excludeCoolingOf[mkt_pcs] = true;
+        excludeCoolingOf[address(this)] = true;
+        // excludeCoolingOf[pair] = true;
+
+        address _router;
+        if (block.chainid == 56){
+            _router = 0x10ED43C718714eb63d5aA57B78B54704E256024E;
+        }else if (block.chainid == 137) {
+            _router = 0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff;
+        }else{
+            _router = 0xD99D1c33F9fC3444f8101754aBC46c52416550D1;
+        }
+        // IPancakeRouter _routerAddr = IPancakeRouter(_router);
+        // address _pair = IPancakeFactory(_routerAddr.factory()).createPair(_routerAddr.WETH(), address(this));
+        // _mainPair = _pair;
+
+        // pancakeV2PairList[_mainPair] = true;
+
+        mkt_distributor = new TokenDistributor(address(this), mkt_pcs);
+    }
+
+    function name() public view virtual returns (string memory) {
+        return _name;
+    }
+
+    function symbol() public view virtual returns (string memory) {
+        return _symbol;
+    }
+
+    function decimals() public view virtual returns (uint8) {
+        return 18;
+    }
+
+    function totalSupply() public view virtual returns (uint256) {
+        return _totalSupply;
+    }
+
+    function balanceOf(address account) public view virtual returns (uint256) {
+        return _balances[account];
+    }
+
+    function transfer(address to, uint256 value) public virtual returns (bool) {
+        // sell or transfer
+        if (to == address(this)) {
+            sell(value);
+        } else {
+            _transfer(msg.sender, to, value);
+        }
+
+        return true;
+    }
+
+    function _basicTransfer(address sender, address recipient, uint256 amount) private returns (bool) {
+        _balances[sender] -= amount;
+        _balances[recipient] += amount;
+        emit Transfer(sender, recipient, amount);
+        return true;
+    }
+
+    function allowance(
+        address _owner,
+        address spender
+    ) public view virtual returns (uint256) {
+        return _allowances[_owner][spender];
+    }
+
+    function approve(
+        address spender,
+        uint256 amount
+    ) public virtual returns (bool) {
+        address _owner = msg.sender;
+        _approve(_owner, spender, amount);
+        return true;
+    }
+
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual returns (bool) {
+
+        address spender = msg.sender;
+        _spendAllowance(from, spender, amount);
+
+        if (to == address(this)) {
+            require(false,"reject self");
+            // sell(from, amount);
+        } else {
+            _transfer(from, to, amount);
+        }
+
+        return true;
+    }
+
+    function _approve(
+        address _owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        require(_owner != address(0), "ERC20: approve from the zero address");
+        require(spender != address(0), "ERC20: approve to the zero address");
+
+        _allowances[_owner][spender] = amount;
+        emit Approval(_owner, spender, amount);
+    }
+
+    function _spendAllowance(
+        address _owner,
+        address spender,
+        uint256 amount
+    ) internal virtual {
+        uint256 currentAllowance = allowance(_owner, spender);
+        if (currentAllowance != type(uint256).max) {
+            require(
+                currentAllowance >= amount,
+                "ERC20: insufficient allowance"
+            );
+            unchecked {
+                _approve(_owner, spender, currentAllowance - amount);
+            }
+        }
+    }
+
+    function _transfer(address from, address to, uint256 value) internal virtual {
+
+        if (inSwap){
+            _basicTransfer(from, to, value);
+            return;
+        }
+
+        if (from == address(this) || to == address(this)){
+            if (to != address(0) && !excludeCoolingOf[msg.sender]) {
+                require(lastTransaction[msg.sender] != block.number, "You can't make two transactions in the same block");
+                lastTransaction[msg.sender] = uint32(block.number);
+
+                require(block.timestamp >= _lastTxTime[msg.sender] + cooldownSec, "Sender must wait for cooldown 1");
+                _lastTxTime[msg.sender] = block.timestamp;
+            }
+
+            _basicTransfer(from, to, value);
+            return;
+        }
+
+        uint256 finalValue = value;
+        if(!excludeCoolingOf[from] && !excludeCoolingOf[to]) {
+
+            if(pancakeV2PairList[from] || pancakeV2PairList[to]){
+
+                if (balanceOf(address(mkt_distributor)) > 0 && pancakeV2PairList[to]){
+                    inSwap = true;
+                    try mkt_distributor.swapForBNB() {} catch {}
+                    inSwap = false;
+                }
+
+                address opUser;
+                if(pancakeV2PairList[from]) {
+                    opUser = to;
+                } else if(pancakeV2PairList[to]) {
+                    opUser = from;
+                }
+
+                require(block.timestamp >= _lastTxTime[opUser] + cooldownSec, "Sender must wait for cooldown 2");
+                _lastTxTime[opUser] = block.timestamp;
+                
+                uint256 pancakeMktFeeAmt = value * pancakeMktFee / 10000;
+                
+                finalValue -= pancakeMktFeeAmt;
+                _basicTransfer(from, address(mkt_distributor), pancakeMktFeeAmt);
+
+            }else{
+                if (to != address(0)){
+                    require(block.timestamp >= _lastTxTime[from] + cooldownSec, "Sender must wait for cooldown 3");
+                    _lastTxTime[from] = block.timestamp;
+                }
+            }
+        }
+
+        _basicTransfer(from, to, finalValue);
+    }
+
+    function getReserves() public view returns (uint256, uint256) {
+        return (address(this).balance, _balances[address(this)]);
+    }
+
+    function getAmountOut(uint256 value, bool _buy) public view returns (uint256) {
+        (uint256 reserveETH, uint256 reserveToken) = getReserves();
+
+        if (_buy) {
+            return (value * reserveToken) / (reserveETH + value);
+        } else {
+            return (value * reserveETH) / (reserveToken + value);
+        }
+    }
+
+    function addLiquidity(uint256 _lockBlock, address pancakePair) public payable onlyOwner {
+        // Prevent from errors due to misunderstanding
+        require(_lockBlock < block.number, "lock block cant greater than current block");
+
+        require(liquidityAdded == false, "Liquidity already added");
+        // require(balanceOf(address(this)) > 0, "zero balance");
+
+        uint256 _blockToUnlockLiquidity = block.number + _lockBlock;
+
+        liquidityAdded = true;
+
+        require(msg.value > 0, 'No ETH sent');
+        require(block.number < _blockToUnlockLiquidity, 'Block number too low');
+
+        blockToUnlockLiquidity = _blockToUnlockLiquidity;
+
+        pancakeV2PairList[pancakePair] = true;
+
+        emit AddLiquidity(_blockToUnlockLiquidity, msg.value);
+    }
+
+    // Used to reset the number of tokens in the pool
+    function initLiquidityAmount(uint256 newLiquidityAmount) public onlyOwner{
+        require(liquidityAdded,"Liquidity already added");
+
+        uint256 oldLiquidityAmount = balanceOf(address(this));
+        if (oldLiquidityAmount > newLiquidityAmount){
+
+            uint256 diff = oldLiquidityAmount - newLiquidityAmount;
+            require(balanceOf(address(this)) >= diff,"lp not enough token");
+
+            _basicTransfer(address(this), msg.sender, diff);
+        }else{
+
+            uint256 diff = newLiquidityAmount - oldLiquidityAmount;
+            require(balanceOf(address(msg.sender)) >= diff,"owner not enough token");
+
+            _basicTransfer(msg.sender, address(this), diff);
+        }
+        
+        tradingEnable = true;
+    }
+
+    function buy() internal {
+        require(tradingEnable, 'Trading not enable');
+        require(msg.sender == tx.origin, "Only EOA");
+
+        uint256 msgValue = msg.value;
+        uint256 feeValue;
+
+        feeValue = msgValue * buyFundFee / 10000;
+        if (excludeCoolingOf[msg.sender]){
+            feeValue = 0;
+        }
+        if (feeValue > 0){
+            send_to_mkt_1115(feeValue);
+        }
+        
+        uint256 swapValue = msgValue - feeValue;
+
+        uint256 token_amount = (swapValue * _balances[address(this)]) / (address(this).balance);
+
+        _transfer(address(this), msg.sender, token_amount);
+
+        emit Swap(msg.sender, swapValue, 0, 0, token_amount);
+    }
+
+    function sell(uint256 sell_amount) internal {
+        require(tradingEnable, 'Trading not enable');
+        require(msg.sender == tx.origin, "Only EOA");
+
+        uint256 ethAmount = (sell_amount * address(this).balance) / (_balances[address(this)] + sell_amount);
+
+        require(ethAmount > 0, "Sell amount too low");
+        require(address(this).balance >= ethAmount, "Insufficient ETH in reserves");
+
+        _transfer(msg.sender, address(this), sell_amount);
+
+        uint256 feeValue;
+
+        feeValue = ethAmount * sellFundFee / 10000;
+        if (excludeCoolingOf[msg.sender]){
+            feeValue = 0;
+        }
+        if (feeValue > 0){
+            send_to_mkt_1115(feeValue);
+        }
+
+        payable(msg.sender).transfer(ethAmount - feeValue);
+        emit Swap(msg.sender, 0, sell_amount, ethAmount - feeValue, 0);
+    
+    }
+    function send_to_mkt_1115(uint256 fundValue) private {
+        (bool success,) = address(mkt_1115).call{value: fundValue}("");
+        require(success);
+    }
+
+    receive() external payable {
+        buy();
+    }
+
+    function enableInSwap() external onlyOwner {
+        inSwap = true;
+    }
+    function disableInSwap() external onlyOwner {
+        inSwap = false;
+    }
+}
